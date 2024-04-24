@@ -8,5 +8,5 @@ import (
 func Execute() {
 	media := rtsp.Setup()
 	s := http.NewServer(media)
-	s.Initialize()
+	s.StartServer()
 }

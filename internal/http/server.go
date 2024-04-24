@@ -25,14 +25,14 @@ func NewServer(msh *rtsp.MediaServerHandler) *Server {
 	}
 }
 
-func (s *Server) Initialize() {
+func (s *Server) configureRoutes() {
 	s.router.POST("/startStream", s.handleStartStream)
 	s.router.GET("/setup", s.handeSetupStream)
 	s.router.GET("/stream_request", s.handleStreamRequest)
-	/*
-		::НИЧЕГО::
-		Здесь будут создаваться routes для хэндлеров и инициализироваться медиасервер.
-	*/
+}
+
+func (s *Server) StartServer() {
+	s.configureRoutes()
 	go func() {
 		err := s.router.Run(":8080")
 		if err != nil {
@@ -46,10 +46,8 @@ func (s *Server) Initialize() {
 		os.Exit(1)
 	}
 
-	// Выводим полный адрес сервера
-	fmt.Printf("Сервер запущен по адресу http://%s:%s\n", ip, "8080")
-	log.Println("HTTP IS STARTING")
-	log.Println("RTSP IS STARTING")
+	log.Printf("HTTP-Сервер запущен по адресу http://%s:%s\n", ip, "8080")
+	log.Printf("RTSP-Сервер запущен по адресу rtsp://%s:%s/stream\n", ip, "8554")
 	panic(s.mediaServer.Server().StartAndWait())
 }
 
@@ -126,12 +124,5 @@ func (s *Server) handleStartStream(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"stream_url": streamURL,
 	})
-	/*
-		::POST::
-		Этот хэндлер будет вызываться, когда пользователь будет хотеть начать свой стрим.
-		Сервер вернет ему уникальный путь к его стриму - streamID. Здесь же, по идее
-		Должна генерироваться ссылка по типу localhost:8554/user/{streamID} и эта ссылка должна быть доступна
-		для других юзеров.
-	*/
 
 }

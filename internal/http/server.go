@@ -42,16 +42,15 @@ func (s *Server) StartServer() {
 	}()
 	ip, err := externalIP()
 	if err != nil {
-		fmt.Println("Ошибка при получении IP-адреса:", err)
+		fmt.Println("Error during getting ip:", err)
 		os.Exit(1)
 	}
 
-	log.Printf("HTTP-Сервер запущен по адресу http://%s:%s\n", ip, "8080")
-	log.Printf("RTSP-Сервер запущен по адресу rtsp://%s:%s/stream\n", ip, "8554")
+	log.Printf("HTTP Server started, address: http://%s:%s\n", ip, "8080")
+	log.Printf("RTSP Server started, address: rtsp://%s:%s/stream\n", ip, "8554")
 	panic(s.mediaServer.Server().StartAndWait())
 }
 
-// Функция для получения внешнего IP-адреса машины
 func externalIP() (string, error) {
 	conn, err := net.Dial("udp", "8.8.8.8:80")
 	if err != nil {
@@ -90,15 +89,12 @@ func (s *Server) handleDisconnection() {
 }
 
 func (s *Server) handeSetupStream(c *gin.Context) {
-	// Получаем параметры из контекста запроса
 	session := c.Keys["Session"].(*gortsplib.ServerSession)
 	conn := c.Keys["Conn"].(*gortsplib.ServerConn)
 	request := c.Keys["Request"].(*base.Request)
 	path := c.Keys["Path"].(string)
 	query := c.Keys["Query"].(string)
 	transport := c.Keys["Transport"].(gortsplib.Transport)
-
-	// Вызываем метод OnSetup вашего медиа-сервера
 	response, _, err := s.mediaServer.OnSetup(&gortsplib.ServerHandlerOnSetupCtx{
 		Session:   session,
 		Conn:      conn,
@@ -108,13 +104,11 @@ func (s *Server) handeSetupStream(c *gin.Context) {
 		Transport: transport,
 	})
 
-	// Обрабатываем результат метода OnSetup
 	if err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
 
-	// Отправляем ответ клиенту
 	c.JSON(int(response.StatusCode), gin.H{"response": response})
 }
 

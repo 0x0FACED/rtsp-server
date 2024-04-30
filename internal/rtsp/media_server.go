@@ -8,6 +8,7 @@ import (
 	"github.com/pion/rtp"
 	"log"
 	"net"
+	"rtsp-server/internal/rtsp/utils"
 	"sync"
 )
 
@@ -16,8 +17,9 @@ type MediaServerHandler struct {
 	mutex            sync.Mutex
 	stream           *gortsplib.ServerStream
 	publisher        *gortsplib.ServerSession
-	StreamManager    *StreamManager
+	StreamManager    *utils.StreamManager
 	connMicroservice net.Conn
+	URL              string
 }
 
 func (msh *MediaServerHandler) OnConnOpen(ctx *gortsplib.ServerHandlerOnConnOpenCtx) {
@@ -35,13 +37,25 @@ func (msh *MediaServerHandler) OnSessionOpen(ctx *gortsplib.ServerHandlerOnSessi
 
 func (msh *MediaServerHandler) OnSessionClose(ctx *gortsplib.ServerHandlerOnSessionCloseCtx) {
 	log.Printf("session closed")
-
 	msh.mutex.Lock()
 	defer msh.mutex.Unlock()
 
 	if msh.stream != nil && ctx.Session == msh.publisher {
 		msh.stream.Close()
 		msh.stream = nil
+
+		if msh.StreamManager.H264Writer != nil {
+			err := msh.StreamManager.H264Writer.Close()
+			if err != nil {
+				log.Println("Error closing H264 writer:", err)
+			}
+		}
+		go func() {
+			err := msh.StreamManager.CreateVideo()
+			if err != nil {
+				log.Println("Error creating MP4 file:", err)
+			}
+		}()
 	}
 }
 
@@ -64,9 +78,8 @@ func (msh *MediaServerHandler) OnDescribe(ctx *gortsplib.ServerHandlerOnDescribe
 }
 
 func (msh *MediaServerHandler) OnAnnounce(ctx *gortsplib.ServerHandlerOnAnnounceCtx) (*base.Response, error) {
-	log.Printf("announce request")
-
-	log.Println("Получен запрос ANNOUNCE на ", ctx.Request.URL)
+	log.Println("Получен запрос ANNOUNCE на", ctx.Request.URL)
+	msh.URL = ctx.Request.URL.String()
 
 	msh.mutex.Lock()
 	defer msh.mutex.Unlock()
@@ -123,22 +136,13 @@ func readFromMicroservice(conn net.Conn) {
 
 func (msh *MediaServerHandler) OnRecord(ctx *gortsplib.ServerHandlerOnRecordCtx) (*base.Response, error) {
 	log.Printf("record request")
-
+	err := error(nil)
+	msh.StreamManager.H264Writer, err = msh.StreamManager.PrepareWriter()
+	if err != nil {
+		log.Println("Error PrepareWriter(): ", err)
+	}
 	ctx.Session.OnPacketRTPAny(func(medi *description.Media, forma format.Format, pkt *rtp.Packet) {
-		if pkt.PayloadType == 97 {
-			_, err := msh.connMicroservice.Write(pkt.Payload)
-			if err != nil {
-				log.Println("Error during conn.Write(payload): ", err)
-			}
-		}
-		go func() {
-			buff := make([]byte, len(pkt.Payload))
-			_, err := msh.connMicroservice.Read(buff)
-			if err != nil {
-				log.Println("Error during conn.Read(buff): ", err)
-			}
-			pkt.Payload = buff
-		}()
+		msh.StreamManager.H264Writer.WriteRTP(pkt)
 		msh.stream.WritePacketRTP(medi, pkt)
 	})
 
@@ -153,12 +157,15 @@ func (msh *MediaServerHandler) Server() *gortsplib.Server {
 }
 
 func Setup() *MediaServerHandler {
-	h := &MediaServerHandler{}
-	err := error(nil)
-	h.connMicroservice, err = net.Dial("tcp", "0.0.0.0:8081")
-	if err != nil {
-		log.Fatal("Failed to connect to Python microservice:", err)
+	sm := utils.NewStreamManager()
+	h := &MediaServerHandler{
+		StreamManager: sm,
 	}
+	//err := error(nil)
+	//h.connMicroservice, err = net.Dial("tcp", "0.0.0.0:8081")
+	//if err != nil {
+	//	log.Fatal("Failed to connect to Python microservice:", err)
+	//}
 	h.s = &gortsplib.Server{
 		Handler:           h,
 		RTSPAddress:       ":8554",

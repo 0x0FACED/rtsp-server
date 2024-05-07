@@ -1,25 +1,28 @@
 package rtsp
 
 import (
+	"fmt"
+	"log"
+	"net"
+	"rtsp-server/internal/rtsp/utils"
+	"sync"
+
 	"github.com/bluenviron/gortsplib/v4"
 	"github.com/bluenviron/gortsplib/v4/pkg/base"
 	"github.com/bluenviron/gortsplib/v4/pkg/description"
 	"github.com/bluenviron/gortsplib/v4/pkg/format"
 	"github.com/pion/rtp"
-	"log"
-	"net"
-	"rtsp-server/internal/rtsp/utils"
-	"sync"
 )
 
 type MediaServerHandler struct {
 	s                *gortsplib.Server
 	mutex            sync.Mutex
-	stream           *gortsplib.ServerStream
-	publisher        *gortsplib.ServerSession
+	streams          map[string]*gortsplib.ServerStream
+	publishers       map[string]*gortsplib.ServerSession
 	StreamManager    *utils.StreamManager
 	connMicroservice net.Conn
-	URL              string
+	URLs             map[int]string
+	index            int
 }
 
 func (msh *MediaServerHandler) OnConnOpen(ctx *gortsplib.ServerHandlerOnConnOpenCtx) {
@@ -29,6 +32,7 @@ func (msh *MediaServerHandler) OnConnOpen(ctx *gortsplib.ServerHandlerOnConnOpen
 
 func (msh *MediaServerHandler) OnConnClose(ctx *gortsplib.ServerHandlerOnConnCloseCtx) {
 	log.Printf("conn closed (%v)", ctx.Error)
+	log.Printf("conn closed (%v)", ctx.Conn.NetConn().RemoteAddr())
 }
 
 func (msh *MediaServerHandler) OnSessionOpen(ctx *gortsplib.ServerHandlerOnSessionOpenCtx) {
@@ -36,24 +40,25 @@ func (msh *MediaServerHandler) OnSessionOpen(ctx *gortsplib.ServerHandlerOnSessi
 }
 
 func (msh *MediaServerHandler) OnSessionClose(ctx *gortsplib.ServerHandlerOnSessionCloseCtx) {
-	log.Printf("session closed")
+	log.Println("session closed: ", ctx.Error)
 	msh.mutex.Lock()
 	defer msh.mutex.Unlock()
-
-	if msh.stream != nil && ctx.Session == msh.publisher {
-		msh.stream.Close()
-		msh.stream = nil
-
-		if msh.StreamManager.H264Writer != nil {
-			err := msh.StreamManager.H264Writer.Close()
-			if err != nil {
-				log.Println("Error closing H264 writer:", err)
-			}
-		}
+	log.Println("session closed: ", ctx.Session.SetuppedPath())
+	if msh.streams[ctx.Session.SetuppedPath()] != nil && ctx.Session == msh.publishers[ctx.Session.SetuppedPath()] {
+		msh.streams[ctx.Session.SetuppedPath()].Close()
+		msh.streams[ctx.Session.SetuppedPath()] = nil
 		go func() {
-			err := msh.StreamManager.CreateVideo()
+			filename := ctx.Session.SetuppedPath()[11:]
+			err := msh.StreamManager.CreateVideo("C:\\videos\\" + filename)
 			if err != nil {
 				log.Println("Error creating MP4 file:", err)
+			}
+
+			message := "--file " + filename + ".mp4" + " --model espcn --scale 4"
+			_, err = msh.connMicroservice.Write([]byte(message))
+			if err != nil {
+				log.Println("Error sending message to Python server:", err)
+				return
 			}
 		}()
 	}
@@ -65,7 +70,7 @@ func (msh *MediaServerHandler) OnDescribe(ctx *gortsplib.ServerHandlerOnDescribe
 	msh.mutex.Lock()
 	defer msh.mutex.Unlock()
 
-	if msh.stream == nil {
+	if msh.streams[ctx.Path] == nil {
 		return &base.Response{
 			StatusCode: base.StatusNotFound,
 		}, nil, nil
@@ -73,24 +78,22 @@ func (msh *MediaServerHandler) OnDescribe(ctx *gortsplib.ServerHandlerOnDescribe
 
 	return &base.Response{
 		StatusCode: base.StatusOK,
-	}, msh.stream, nil
+	}, msh.streams[ctx.Path], nil
 
 }
 
 func (msh *MediaServerHandler) OnAnnounce(ctx *gortsplib.ServerHandlerOnAnnounceCtx) (*base.Response, error) {
 	log.Println("Получен запрос ANNOUNCE на", ctx.Request.URL)
-	msh.URL = ctx.Request.URL.String()
-
 	msh.mutex.Lock()
 	defer msh.mutex.Unlock()
-	if msh.stream != nil {
-		msh.stream.Close()
-		msh.publisher.Close()
-	}
+	msh.URLs[msh.index] = ctx.Path
+	sm := utils.NewStreamManager()
+	msh.StreamManager = sm
 
-	msh.stream = gortsplib.NewServerStream(msh.s, ctx.Description)
-	msh.publisher = ctx.Session
+	msh.streams[ctx.Path] = gortsplib.NewServerStream(msh.s, ctx.Description)
+	msh.publishers[ctx.Path] = ctx.Session
 
+	msh.index++
 	return &base.Response{
 		StatusCode: base.StatusOK,
 	}, nil
@@ -98,17 +101,17 @@ func (msh *MediaServerHandler) OnAnnounce(ctx *gortsplib.ServerHandlerOnAnnounce
 
 func (msh *MediaServerHandler) OnSetup(ctx *gortsplib.ServerHandlerOnSetupCtx) (*base.Response, *gortsplib.ServerStream, error) {
 	log.Printf("setup request")
+	msh.mutex.Lock()
 	log.Println("SETUP: ", ctx.Path)
-	// no one is publishing yet
-	if msh.stream == nil {
+	if msh.streams[ctx.Path] == nil {
 		return &base.Response{
 			StatusCode: base.StatusNotFound,
 		}, nil, nil
 	}
-
+	msh.mutex.Unlock()
 	return &base.Response{
 		StatusCode: base.StatusOK,
-	}, msh.stream, nil
+	}, msh.streams[ctx.Path], nil
 }
 
 func (msh *MediaServerHandler) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, error) {
@@ -119,31 +122,19 @@ func (msh *MediaServerHandler) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*b
 	}, nil
 }
 
-func readFromMicroservice(conn net.Conn) {
-	defer conn.Close()
-
-	for {
-		buff := make([]byte, 1024)
-		n, err := conn.Read(buff)
-		if err != nil {
-			log.Println("Error reading data from Python microservice:", err)
-			return
-		}
-
-		log.Println("Received data from Python microservice:", buff[:n])
-	}
-}
-
 func (msh *MediaServerHandler) OnRecord(ctx *gortsplib.ServerHandlerOnRecordCtx) (*base.Response, error) {
 	log.Printf("record request")
-	err := error(nil)
-	msh.StreamManager.H264Writer, err = msh.StreamManager.PrepareWriter()
+	path := "C:\\videos\\" + ctx.Path[11:]
+	fmt.Println(path)
+	writer, err := msh.StreamManager.PrepareWriter(path)
+
 	if err != nil {
 		log.Println("Error PrepareWriter(): ", err)
 	}
+	stream := msh.streams[ctx.Path]
 	ctx.Session.OnPacketRTPAny(func(medi *description.Media, forma format.Format, pkt *rtp.Packet) {
-		msh.StreamManager.H264Writer.WriteRTP(pkt)
-		msh.stream.WritePacketRTP(medi, pkt)
+		writer.WriteRTP(pkt)
+		stream.WritePacketRTP(medi, pkt)
 	})
 
 	return &base.Response{
@@ -157,15 +148,20 @@ func (msh *MediaServerHandler) Server() *gortsplib.Server {
 }
 
 func Setup() *MediaServerHandler {
-	sm := utils.NewStreamManager()
-	h := &MediaServerHandler{
-		StreamManager: sm,
+	streams := make(map[string]*gortsplib.ServerStream)
+	publishers := make(map[string]*gortsplib.ServerSession)
+	urls := make(map[int]string)
+	conn, err := net.Dial("tcp", "0.0.0.0:8081")
+	if err != nil {
+		log.Fatal("Failed to connect to Python microservice:", err)
 	}
-	//err := error(nil)
-	//h.connMicroservice, err = net.Dial("tcp", "0.0.0.0:8081")
-	//if err != nil {
-	//	log.Fatal("Failed to connect to Python microservice:", err)
-	//}
+	h := &MediaServerHandler{
+		streams:          streams,
+		publishers:       publishers,
+		URLs:             urls,
+		index:            0,
+		connMicroservice: conn,
+	}
 	h.s = &gortsplib.Server{
 		Handler:           h,
 		RTSPAddress:       ":8554",

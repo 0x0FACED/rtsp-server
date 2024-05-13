@@ -53,9 +53,13 @@ func (msh *MediaServerHandler) OnSessionClose(ctx *gortsplib.ServerHandlerOnSess
 			if err != nil {
 				log.Println("Error creating MP4 file:", err)
 			}
-
-			message := "--file " + filename + ".mp4" + " --model espcn --scale 4"
+			ans := make([]byte, 16)
+			message := "--file " + filename + ".mp4" + " --model espcn --scale 2\n" +
+				"--file " + filename + ".mp4" + " --model edsr --scale 2\n" +
+				"--file " + filename + ".mp4" + " --model fsrcnn --scale 2\n" +
+				"--file " + filename + ".mp4" + " --model lapsrn --scale 2\n"
 			_, err = msh.connMicroservice.Write([]byte(message))
+			msh.connMicroservice.Read(ans)
 			if err != nil {
 				log.Println("Error sending message to Python server:", err)
 				return
